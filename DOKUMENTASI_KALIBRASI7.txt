@@ -1,0 +1,459 @@
+DOKUMENTASI KALIBRASI7
+=======================
+
+1. LATAR BELAKANG
+-----------------
+
+File kalibrasi7.py dibuat untuk memproses data timestamp game Spaceman yang
+berasal dari scraper/bot WebSocket. Data tersebut memiliki beberapa jenis
+waktu yang sumber dan tingkat kepercayaannya berbeda:
+
+- tag_ts: timestamp Epoch dari server.
+- ts: timestamp Starttime yang dicatat bot ketika tag diterima.
+- startdealing_ts: timestamp Start Dealing yang dicatat bot ketika tag diterima.
+- gr_ts: timestamp Gr/crash yang dicatat bot ketika tag diterima.
+- gr_result: multiplier/result round.
+- game_id: identitas round.
+- status: live atau history.
+
+Perbedaan utama antara tag_ts dan timestamp lainnya adalah tag_ts berasal dari
+Epoch server dan memiliki bentuk milidetik. Timestamp lain bukan timestamp
+server yang benar-benar bebas delay; timestamp tersebut dapat terpengaruh oleh
+waktu penerimaan WebSocket, antrean pesan, reconnect, dan jitter.
+
+Karena itu timestamp yang sudah terisi tidak otomatis benar. Timestamp yang
+kosong juga tidak boleh diisi hanya dengan angka tetap tanpa melihat hubungan
+dengan round di sekitarnya.
+
+2. TUJUAN KALIBRASI7
+---------------------
+
+Tujuan kalibrasi7.py bukan membuktikan waktu internal game secara sempurna.
+Tujuannya adalah membuat timeline yang cukup konsisten untuk:
+
+1. Mempertahankan Epoch server yang tersedia sebagai anchor utama.
+2. Mengidentifikasi timestamp bot yang masih dapat dipakai sebagai anchor lokal.
+3. Mengoreksi timestamp bot yang jelas menyimpang.
+4. Mengisi timestamp yang kosong di tengah data live.
+5. Menjaga hubungan antar-round agar data dapat dipakai untuk pengujian script
+   berikutnya.
+6. Tidak memaksakan timestamp history leading atau trailing yang tidak memiliki
+   anchor waktu absolut.
+
+Hasil repair harus dipahami sebagai estimasi terkalibrasi, bukan bukti resmi
+waktu event dari server.
+
+3. FORMAT INPUT DAN OUTPUT
+--------------------------
+
+Penggunaan:
+
+    python kalibrasi7.py target.md
+
+Script hanya menerima satu argumen, yaitu file target. Output dibuat otomatis
+dengan nama:
+
+    (nama_file_target)_kalibrasi.md
+
+Contoh:
+
+    python kalibrasi7.py output_spaceman.md
+
+Output:
+
+    output_spaceman_kalibrasi.md
+
+Kolom output diurutkan menjadi:
+
+    tag_ts | ts | startdealing_ts | gr_ts | gr_result | game_id | status
+
+Kolom tag_ts raw yang sudah tersedia dipertahankan. Timestamp hasil kalibrasi
+ditulis dengan presisi milidetik apabila dapat direkonstruksi.
+
+4. DEFINISI ANCHOR
+------------------
+
+4.1. Anchor absolut: tag_ts
+
+tag_ts adalah Epoch server. Nilai tag_ts yang sudah ada tidak dikoreksi oleh
+kalibrasi7.py. Nilai tersebut digunakan sebagai anchor waktu absolut untuk
+mengkalibrasi timestamp bot pada round yang sama.
+
+Dengan kata lain:
+
+    tag_ts raw yang valid -> tidak diubah -> dipakai sebagai anchor
+
+Jika tag_ts kosong di tengah rangkaian yang memiliki anchor kiri dan kanan,
+script dapat menghasilkan estimasi tag_ts untuk menyambung timeline. Nilai
+tersebut bukan Epoch server asli dan berbeda sifatnya dari tag_ts raw.
+
+tag_ts yang kosong pada bagian leading/trailing tanpa anchor yang memadai tidak
+seharusnya dianggap sebagai server truth.
+
+4.2. Anchor lokal: ts
+
+ts adalah Starttime yang dicatat bot. Jika hubungan ts terhadap tag_ts masih
+berada dalam batas toleransi, ts raw dipertahankan dan dapat menjadi anchor
+lokal untuk event lain di round yang sama.
+
+Ini adalah keputusan penting dalam kalibrasi7:
+
+    ts masih dalam threshold -> pertahankan ts raw
+
+Tujuannya adalah tidak merusak observasi yang masih cukup dekat dengan Epoch.
+Threshold hanya digunakan untuk klasifikasi. Timestamp yang keluar threshold
+tidak dipotong ke batas threshold; timestamp tersebut dihitung ulang dari
+anchor dan pusat kalibrasi.
+
+5. PEMISAHAN EVENT TETAP DAN DINAMIS
+-------------------------------------
+
+Kalibrasi7 memisahkan dua kelompok hubungan waktu.
+
+5.1. Hubungan event tetap atau relatif stabil
+
+Hubungan berikut diperlakukan sebagai interval yang relatif tetap dan dapat
+dikalibrasi dengan median:
+
+    tag_ts -> ts
+    ts -> startdealing_ts
+    gr_ts[n] -> tag_ts[n+1]
+    gr_ts[n] -> startdealing_ts[n+1]
+
+Interval tersebut tidak benar-benar bebas jitter. Namun dari data yang ada,
+intervalnya lebih stabil daripada durasi penerbangan yang berubah menurut
+multiplier.
+
+5.2. Hubungan event dinamis
+
+Hubungan berikut bersifat dinamis:
+
+    startdealing_ts[n] -> gr_ts[n]
+
+Durasi ini dipengaruhi oleh gr_result/multiplier. Round dengan multiplier kecil
+dan besar tidak boleh dipaksa memakai satu durasi tetap.
+
+Karena formula flight tidak selalu akurat untuk semua rentang multiplier,
+kalibrasi7 menggunakan formula multiplier terutama sebagai fallback atau
+validator. Untuk repair Gr, anchor dari round berikutnya lebih diprioritaskan
+jika tersedia.
+
+6. METODE KALIBRASI
+-------------------
+
+6.1. Parsing waktu
+
+Epoch dibaca sebagai angka milidetik. Timestamp jam dibaca sebagai waktu clock
+lokal dan dikonversi menjadi waktu absolut dengan bantuan Epoch pada round yang
+sama. Konversi ini diperlukan supaya timestamp yang melewati pergantian hari
+atau tengah malam tetap dapat dibandingkan secara benar.
+
+6.2. Menghitung pusat interval
+
+Dari data raw yang tersedia dan memenuhi rentang dasar, script menghitung median
+untuk:
+
+    tag_to_ts
+    ts_to_deal
+    gr_next_epoch
+    gr_next_deal
+
+Median dipakai karena lebih tahan terhadap outlier dibanding mean. Nilai pusat
+bukan batas threshold dan bukan nilai yang diambil dari baris outlier.
+
+Jika tidak ada sampel yang lolos, script memakai nilai fallback konservatif:
+
+    tag_to_ts       = 0 ms
+    ts_to_deal      = 8300 ms
+    gr_next_epoch   = 2400 ms
+    gr_next_deal    = 9900 ms
+
+Fallback hanya berarti tidak ada pusat yang berhasil dikalibrasi dari input.
+Fallback tidak boleh dianggap sebagai pengukuran server.
+
+6.3. Kalibrasi ts
+
+Untuk setiap row setelah 50 row pertama:
+
+- Jika ts raw tersedia, tag_ts tersedia, dan offset-nya masih dalam threshold,
+  ts raw dipertahankan.
+- Jika ts raw kosong atau offset-nya dianggap outlier, ts dihitung dari:
+
+      ts_calibrated = tag_ts + median(tag_ts -> ts)
+
+- Jika tag_ts tidak tersedia tetapi ts calibrated dari tetangga tersedia,
+  timestamp dapat diisi dari anchor internal yang tersedia.
+
+Keputusan ini membuat ts yang masih wajar tetap menjadi anchor round, sedangkan
+nilai yang jelas rusak tidak dibiarkan menggeser event lain.
+
+6.4. Kalibrasi startdealing_ts
+
+startdealing_ts dikalibrasi relatif terhadap ts calibrated:
+
+    startdealing_calibrated = ts_anchor + median(ts -> startdealing)
+
+Jika startdealing_ts raw masih berada dalam toleransi dari hubungan tersebut,
+nilai raw dipertahankan. Jika kosong atau menyimpang, nilai tersebut diganti
+dengan kandidat calibrated.
+
+6.5. Kalibrasi gr_ts
+
+Gr tidak memakai interval tetap dari startdealing pada round yang sama. Untuk
+mengisi atau mengoreksi Gr, script mencari anchor dari round berikutnya:
+
+    kandidat 1 = tag_ts[n+1] - median(gr -> next tag_ts)
+    kandidat 2 = startdealing_ts[n+1]
+                 - median(gr -> next startdealing_ts)
+
+Jika tersedia lebih dari satu kandidat fixed-event, script menggunakan median
+kandidat tersebut. Jika tidak ada kandidat fixed-event, script memakai Gr raw
+yang masih berurutan. Jika itu juga tidak tersedia, script memakai fallback
+berbasis formula flight dan multiplier bila dapat dihitung.
+
+Secara konsep, prioritasnya adalah:
+
+    next tag_ts
+    next startdealing_ts
+    Gr raw yang masih struktural valid
+    formula flight berdasarkan multiplier
+
+6.6. Rekonstruksi Epoch internal
+
+Epoch yang hilang di tengah dapat diperkirakan dari gap yang memperhitungkan
+multiplier round sebelumnya atau round saat ini. Kandidat dapat dibentuk dari
+sisi kiri dan kanan, lalu digabungkan.
+
+Ini berbeda dari interpolasi midpoint murni berdasarkan nomor baris. Midpoint
+nomor baris tidak cukup karena jarak antar-Epoch dipengaruhi multiplier.
+
+Namun hasil Epoch yang direkonstruksi tetap hanya estimasi. Epoch raw yang ada
+tetap menjadi prioritas dan tidak diganti.
+
+7. KENAPA PENDEKATAN INI DIGUNAKAN
+-----------------------------------
+
+Pendekatan ini dipilih karena struktur data memiliki dua karakter berbeda:
+
+1. Durasi antar event tertentu relatif stabil dan dapat dipakai sebagai jaringan
+   sinkronisasi.
+2. Durasi Start Dealing -> Gr berubah menurut multiplier dan sulit dimodelkan
+   presisi di seluruh rentang hasil.
+
+Jika semua timestamp dipaksakan memakai formula multiplier, error pada formula
+flight akan menyebar ke seluruh timeline. Sebaliknya, jika semua timestamp
+dipaksakan memakai interval tetap, Gr pada multiplier besar akan salah.
+
+Dengan memisahkan event tetap dan event dinamis:
+
+- Epoch tetap menjadi anchor absolut.
+- ts valid menjadi anchor lokal.
+- startdealing mengikuti hubungan fixed-event.
+- Gr mengikuti anchor round berikutnya jika tersedia.
+- multiplier hanya dipakai pada bagian yang memang dinamis.
+
+Pendekatan ini lebih tepat untuk tujuan repair internal karena menggunakan
+informasi yang paling kuat untuk setiap jenis event, bukan satu rumus untuk
+semua kolom.
+
+8. KENAPA MEDIAN DAN BUKAN BATAS THRESHOLD
+-------------------------------------------
+
+Misalkan pusat interval ts -> startdealing adalah 7600 ms dan threshold-nya
+adalah +/-150 ms. Rentang yang diterima adalah:
+
+    7450 ms sampai 7750 ms
+
+Jika nilai raw adalah 8743 ms, nilai tersebut bukan diubah menjadi 7750 ms.
+Threshold hanya menyatakan bahwa 8743 ms patut dicurigai. Nilai repair harus
+dihitung dari anchor:
+
+    startdealing_repaired = ts_anchor + 7600 ms
+
+Dengan demikian:
+
+- threshold = aturan klasifikasi;
+- median/center = nilai model untuk repair;
+- anchor = titik waktu tempat hasil repair diterapkan.
+
+9. LOCKED ROWS
+--------------
+
+50 row pertama dipertahankan tanpa perubahan, sesuai kebutuhan pengujian dan
+aturan awal pipeline.
+
+Konsekuensinya, timestamp pada 50 row pertama bukan hasil kalibrasi7. Jika
+analisis global mencakup row tersebut, perlakukan bagian itu sebagai segmen
+locked, bukan campurkan begitu saja dengan bagian yang sudah dikalibrasi.
+
+10. HISTORY DAN GAP INTERNAL
+----------------------------
+
+History panjang tanpa tag_ts tidak memiliki anchor absolut yang cukup. Oleh
+karena itu hasil yang paling jujur adalah membiarkannya kosong atau hanya
+mengisinya jika ada anchor kuat yang mengapitnya.
+
+Fokus utama kalibrasi7 adalah lubang internal yang memiliki konteks sebelum dan
+sesudahnya. Untuk gap internal:
+
+    anchor kiri -> round kosong -> anchor kanan
+
+Timestamp diisi dari hubungan event dan multiplier yang tersedia, lalu harus
+diperiksa lagi terhadap round live sebelum dan sesudahnya.
+
+Jangan menyamakan timestamp history hasil extrapolation dengan Epoch server
+asli.
+
+11. METODE LAIN YANG DIPERTIMBANGKAN
+-------------------------------------
+
+11.1. Mempertahankan semua timestamp raw
+
+Metode ini paling aman untuk audit, tetapi tidak menyelesaikan masalah utama.
+Timestamp raw dapat mengalami delay penerimaan sehingga gap antar-round dan
+hubungan event menjadi tidak konsisten.
+
+Tidak dipakai sebagai metode final, tetapi tetap dipakai jika nilai raw masih
+masuk threshold dan dapat dijadikan anchor lokal.
+
+11.2. Mengganti semua event dengan median global
+
+Contoh:
+
+    semua ts -> tag_ts + center
+    semua startdealing -> ts + center
+    semua gr -> startdealing + durasi tetap
+
+Metode ini sederhana, tetapi terlalu agresif. Ia menghancurkan variasi raw yang
+masih valid dan salah untuk Gr karena Gr bersifat dinamis.
+
+Tidak dipakai.
+
+11.3. Interpolasi berdasarkan nomor baris
+
+Contoh:
+
+    epoch[n] = titik tengah epoch[n-1] dan epoch[n+1]
+
+Metode ini tidak mempertimbangkan multiplier. Dua gap antar-Epoch yang
+mengapit round kosong bisa memiliki durasi berbeda. Karena itu midpoint nomor
+baris dapat menghasilkan round yang terlihat rapi tetapi tidak sinkron dengan
+hasil multiplier.
+
+Tidak dipakai sebagai prinsip utama.
+
+11.4. Formula flight multiplier untuk semua Gr
+
+Formula log-growth:
+
+    flight_ms ~= (1000 / K_FLIGHT) * ln(multiplier)
+
+berguna sebagai model dan fallback. Namun berdasarkan pengujian sebelumnya,
+residualnya tidak stabil di semua rentang multiplier, terutama multiplier
+sangat tinggi dan sebagian multiplier rendah.
+
+Tidak dipakai sebagai sumber utama jika next Epoch atau next Start Dealing
+tersedia.
+
+11.5. Memakai K_GAP sebagai pure flight
+
+K_GAP menggambarkan interval penuh Epoch ke Epoch berikutnya yang mencakup
+fase betting, flight, dan post-crash. K_GAP tidak boleh dipakai langsung sebagai
+pure flight dari Start Dealing ke Gr.
+
+Tidak dipakai untuk menggantikan event dinamis secara langsung.
+
+11.6. Menggunakan Epoch sebagai waktu penerimaan bot
+
+Epoch dibuat di server sebelum diterima melalui WebSocket. Karena itu Epoch
+tidak boleh diperlakukan sebagai timestamp client yang memiliki delay penerimaan
+yang sama dengan semua tag lain.
+
+Epoch dipakai sebagai anchor server dan constraint pemeriksaan, bukan sebagai
+waktu penerimaan identik.
+
+12. VALIDASI YANG SEBAIKNYA DILAKUKAN
+--------------------------------------
+
+Setelah output dibuat, audit sebaiknya menghitung pasangan berurutan:
+
+    epoch_gap[n] = tag_ts[n+1] - tag_ts[n]
+    ts_gap[n] = ts[n+1] - ts[n]
+    deal_gap[n] = startdealing[n+1] - startdealing[n]
+
+Kemudian hitung residual:
+
+    residual_ts[n] = ts_gap[n] - epoch_gap[n]
+    residual_deal[n] = deal_gap[n] - epoch_gap[n]
+
+Sebagai aturan praktis pengujian, residual absolut sekitar 500 ms masih dapat
+dianggap wajar untuk data yang memiliki jitter dan delay penerimaan. Namun
+persentase yang lolos, maksimum residual, dan jumlah outlier tetap harus
+dilaporkan.
+
+Untuk setiap round, periksa juga urutan:
+
+    ts < startdealing_ts < gr_ts
+
+Dan untuk hubungan antar-round:
+
+    gr_ts[n] < tag_ts[n+1]
+    gr_ts[n] < startdealing_ts[n+1]
+
+Untuk timestamp yang diisi, sebaiknya simpan atau hitung kembali sumbernya:
+
+    raw
+    calibrated_from_tag_ts
+    calibrated_from_local_ts
+    repaired_from_next_tag
+    repaired_from_next_dealing
+    repaired_from_flight_model
+    estimated_internal
+
+Versi output dasar kalibrasi7 mempertahankan format sederhana sesuai permintaan.
+Informasi source/confidence belum menjadi kolom output utama, sehingga audit
+rinci dapat dilakukan dengan script pemeriksa terpisah.
+
+13. KETERBATASAN KALIBRASI7
+----------------------------
+
+Kalibrasi7 bukan rekonstruksi server yang sempurna. Keterbatasannya:
+
+- Timestamp non-Epoch tetap merupakan estimasi.
+- Median global dapat mengabaikan perubahan kondisi jaringan atau server.
+- Formula flight tidak akurat sempurna untuk semua multiplier.
+- Konflik antara anchor kiri, anchor kanan, dan multiplier masih perlu diaudit.
+- 50 row pertama tidak dikalibrasi.
+- History tanpa anchor absolut tidak dapat dipastikan waktunya.
+- Timestamp hasil repair tidak boleh disebut ground truth.
+
+Jika ditemukan outlier tiga lapis dengan residual lebih dari 500 ms, jangan
+langsung mengubah seluruh round. Epoch raw tetap dipertahankan. Identifikasi
+terlebih dahulu apakah yang menyimpang adalah ts, startdealing_ts, atau gr_ts.
+Repair seminimal mungkin dan gunakan kandidat dari anchor kiri/kanan. Untuk Gr,
+prioritaskan next Epoch dan next Start Dealing; gunakan multiplier sebagai
+validator atau fallback.
+
+14. KESIMPULAN
+--------------
+
+Kalibrasi7 dibuat karena persoalan ini bukan sekadar mengisi sel kosong.
+Timestamp yang sudah berisi juga dapat merupakan waktu penerimaan bot dan perlu
+kalibrasi. Namun tidak semua event memiliki karakter yang sama.
+
+Strategi yang digunakan adalah:
+
+    tag_ts server sebagai anchor absolut
+    ts valid sebagai anchor lokal
+    hubungan fixed-event untuk sinkronisasi
+    multiplier untuk event dinamis Start Dealing -> Gr
+    next-round anchor untuk mengisi Gr
+    median untuk mengurangi pengaruh outlier
+    raw Epoch tidak diubah
+    gap internal diisi jika memiliki konteks
+    history tanpa anchor tidak dipaksakan
+
+Dengan pemisahan tersebut, script tidak menggunakan satu asumsi yang sama
+untuk semua timestamp. Hasilnya dimaksudkan sebagai timeline terkalibrasi yang
+konsisten untuk pengujian lanjutan, bukan sebagai klaim bahwa seluruh waktu
+event telah diketahui secara absolut dan sempurna.
